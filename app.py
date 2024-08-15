@@ -10,11 +10,11 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 # Load the model and components
-model = load_model('./sequence_2_sequence.keras')
-encoder_model = load_model('encoder_model.keras')
-decoder_model = load_model('decoder_model.keras')
+model = load_model('./models2/sequence_2_sequence.keras')
+encoder_model = load_model('./models2/encoder_model.keras')
+decoder_model = load_model('./models2/decoder_model.keras')
 
-with open('model_components.pkl', 'rb') as f:
+with open('./models2/model_components.pkl', 'rb') as f:
     components = pickle.load(f)
 
 x_tokenizer = components['x_tokenizer']
