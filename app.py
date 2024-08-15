@@ -1,14 +1,16 @@
 from sentence_transformers import SentenceTransformer, util
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
 import heapq
 import re
 from io import BytesIO
 
 import PyPDF2
+import nltk
 import streamlit as st
 import torch
 from nltk.tokenize import sent_tokenize
+
+nltk.download('punkt')
 
 
 # Load the extractive model
