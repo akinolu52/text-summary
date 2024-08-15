@@ -1,68 +1,99 @@
-import pickle
+from sentence_transformers import SentenceTransformer, util
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+import heapq
 import re
 from io import BytesIO
 
 import PyPDF2
-import numpy as np
-import requests
 import streamlit as st
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-
-# Load the model and components
-model = load_model('./models2/sequence_2_sequence.keras')
-encoder_model = load_model('./models2/encoder_model.keras')
-decoder_model = load_model('./models2/decoder_model.keras')
-
-with open('./models2/model_components.pkl', 'rb') as f:
-    components = pickle.load(f)
-
-x_tokenizer = components['x_tokenizer']
-reverse_target_word_index = components['reverse_target_word_index']
-target_word_index = components['target_word_index']
-max_text_len = components['max_text_len']
-max_summary_len = components['max_summary_len']
+import torch
+from nltk.tokenize import sent_tokenize
 
 
-# Function to generate summary
-def generate_summary(input_seq):
-    # Encode the input as state vectors.
-    e_out, e_h, e_c = encoder_model.predict(input_seq)
-
-    # Generate empty target sequence of length 1.
-    target_seq = np.zeros((1, 1))
-
-    # Populate the first word of target sequence with the start word.
-    target_seq[0, 0] = target_word_index['sostok']
-
-    stop_condition = False
-    decoded_sentence = ''
-    while not stop_condition:
-
-        output_tokens, h, c = decoder_model.predict([target_seq] + [e_out, e_h, e_c])
-
-        # Sample a token
-        sampled_token_index = np.argmax(output_tokens[0, -1, :])
-        sampled_token = reverse_target_word_index[sampled_token_index]
-
-        if sampled_token != 'eostok':
-            decoded_sentence += ' ' + sampled_token
-
-        # Exit condition: either hit max length or find stop word.
-        if sampled_token == 'eostok' or len(decoded_sentence.split()) >= (max_summary_len - 1):
-            stop_condition = True
-
-        # Update the target sequence (of length 1).
-        target_seq = np.zeros((1, 1))
-        target_seq[0, 0] = sampled_token_index
-
-        # Update internal states
-        e_h, e_c = h, c
-
-    return decoded_sentence
+# Load the extractive model
+@st.cache_resource
+def load_extractive_model():
+    try:
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("Model loaded successfully!")
+        return model
+    except Exception as e:
+        print(f"Error loading model: {e}")
 
 
-# Function to extract text from PDF
+# load the abstractive model
+@st.cache_resource
+def load_model():
+    model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+    tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
+    return model, tokenizer
+
+
+extractive_model = load_extractive_model()
+
+abstractive_model, abstractive_tokenizer = load_model()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+abstractive_model = abstractive_model.to(device)
+
+
+def generate_abstractive_summary(text):
+    max_summary_length = max(30, min(len(text.split()) // 2, 150))
+
+    inputs = abstractive_tokenizer(text, max_length=1024, truncation=True, return_tensors="pt").to(device)
+    summary_ids = abstractive_model.generate(
+        inputs["input_ids"],
+        num_beams=4,
+        max_length=max_summary_length,
+        min_length=30,
+        length_penalty=2.0,
+        early_stopping=True
+    )
+    summary = abstractive_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+
+    print(len(summary))
+    return summary
+
+
+def clean_text(text):
+    text = text.strip()
+    # remove extra whitespaces
+    text = re.sub(r'\s+', ' ', text)
+    # remove \n and quotes like “, ‘, ”
+    text = re.sub(r'[\n“”‘’]', '', text)
+
+    return text
+
+
+def compute_sentence_embeddings(sentences):
+    embeddings = extractive_model.encode(sentences, convert_to_tensor=True)
+    return embeddings
+
+
+def generate_extractive_summary(text, summary_ratio=0.3):
+    text = clean_text(text)
+
+    # Tokenize the text into sentences
+    sentences = sent_tokenize(text)
+    if len(sentences) == 0:
+        return ""
+
+    # Compute sentence embeddings
+    sentence_embeddings = compute_sentence_embeddings(sentences)
+
+    # Compute pairwise sentence similarities
+    sentence_scores = {}
+    for i, sentence in enumerate(sentences):
+        sentence_score = util.pytorch_cos_sim(sentence_embeddings[i], sentence_embeddings).sum().item()
+        sentence_scores[sentence] = sentence_score / len(sentences)  # Normalize by number of sentences
+
+    # Get the top `summary_ratio`% of sentences with the highest scores
+    num_summary_sentences = max(1, int(len(sentences) * summary_ratio))
+    summary_sentences = heapq.nlargest(num_summary_sentences, sentence_scores, key=sentence_scores.get)
+    summary = ' '.join(summary_sentences)
+    return summary
+
+
 def extract_text_from_pdf(pdf_file):
     pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_file.read()))
     c = 0
@@ -70,7 +101,6 @@ def extract_text_from_pdf(pdf_file):
 
     while c < len(pdf_reader.pages):
         pageObj = pdf_reader.pages[c]
-        # text += pageObj.extract_text()
         page_text = pageObj.extract_text()
         if page_text:
             # Add line breaks based on common patterns
@@ -87,6 +117,8 @@ st.title("Text Summarization App")
 # Option to upload PDF or enter text
 option = st.radio("Choose input method", ["Upload PDF", "Enter Text"])
 
+text_to_process = ""
+
 # Handle PDF upload
 if option == "Upload PDF":
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
@@ -100,32 +132,47 @@ if option == "Upload PDF":
 
 # Handle direct text input
 elif option == "Enter Text":
-    text_to_process = st.text_area("Enter your paragraph to summarize here:", height=100)
+    text_to_process = st.text_area("Enter your paragraph to summarize here:", height=120)
 
 # Button to process the text
-if st.button("Summarize Text"):
+if st.button("Generate Summary"):
     if text_to_process:
-        response = requests.post(
-            'http://127.0.0.1:5000/process',
-            json={'paragraph': text_to_process}
-        )
+        with st.spinner("Generating summary..."):
+            # extractive_summary = generate_extractive_summary(text_to_process)
+            try:
+                extractive_summary = generate_extractive_summary(text_to_process)
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+                extractive_summary = None
+            try:
+                abstractive_summary = generate_abstractive_summary(text_to_process)
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+                abstractive_summary = None
 
-        if response.status_code == 200:
-            result = response.json()
+        # try:
+        #     extractive_summary = generate_extractive_summary(text_to_process)
+        # except Exception as e:
+        #     st.error(f"An error occurred: {e}")
+        #     extractive_summary = None
+
+        if extractive_summary:
             st.subheader("Extractive Summary:")
-            st.write(result.get('summary'))
+            st.write(extractive_summary)
         else:
-            st.error(f"Error: {response.json().get('error')}")
+            st.error(f"Error: while getting the extractive summary.")
 
-        # Preprocess the input
-        input_seq = x_tokenizer.texts_to_sequences([text_to_process])
-        input_seq = pad_sequences(input_seq, maxlen=max_text_len, padding='post')
+        # try:
+        #     abstractive_summary = generate_abstractive_summary(text_to_process)
+        # except Exception as e:
+        #     st.error(f"An error occurred: {e}")
+        #     abstractive_summary = None
 
-        # Generate summary
-        abstractive_summary = generate_summary(input_seq)
-
-        st.subheader("Abstractive Text")
-        st.write(abstractive_summary)
+        if abstractive_summary:
+            st.subheader("Abstractive Summary:")
+            st.write(abstractive_summary)
+        else:
+            st.error(f"Error: while getting the abstractive summary.")
     else:
         st.error("Please enter some text before processing.")
 
