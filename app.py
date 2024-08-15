@@ -1,8 +1,65 @@
-import streamlit as st
-import requests
-import PyPDF2
-from io import BytesIO
+import pickle
 import re
+from io import BytesIO
+
+import PyPDF2
+import numpy as np
+import requests
+import streamlit as st
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+# Load the model and components
+model = load_model('./sequence_2_sequence.keras')
+encoder_model = load_model('encoder_model.keras')
+decoder_model = load_model('decoder_model.keras')
+
+with open('model_components.pkl', 'rb') as f:
+    components = pickle.load(f)
+
+x_tokenizer = components['x_tokenizer']
+reverse_target_word_index = components['reverse_target_word_index']
+target_word_index = components['target_word_index']
+max_text_len = components['max_text_len']
+max_summary_len = components['max_summary_len']
+
+
+# Function to generate summary
+def generate_summary(input_seq):
+    # Encode the input as state vectors.
+    e_out, e_h, e_c = encoder_model.predict(input_seq)
+
+    # Generate empty target sequence of length 1.
+    target_seq = np.zeros((1, 1))
+
+    # Populate the first word of target sequence with the start word.
+    target_seq[0, 0] = target_word_index['sostok']
+
+    stop_condition = False
+    decoded_sentence = ''
+    while not stop_condition:
+
+        output_tokens, h, c = decoder_model.predict([target_seq] + [e_out, e_h, e_c])
+
+        # Sample a token
+        sampled_token_index = np.argmax(output_tokens[0, -1, :])
+        sampled_token = reverse_target_word_index[sampled_token_index]
+
+        if sampled_token != 'eostok':
+            decoded_sentence += ' ' + sampled_token
+
+        # Exit condition: either hit max length or find stop word.
+        if sampled_token == 'eostok' or len(decoded_sentence.split()) >= (max_summary_len - 1):
+            stop_condition = True
+
+        # Update the target sequence (of length 1).
+        target_seq = np.zeros((1, 1))
+        target_seq[0, 0] = sampled_token_index
+
+        # Update internal states
+        e_h, e_c = h, c
+
+    return decoded_sentence
 
 
 # Function to extract text from PDF
@@ -60,10 +117,15 @@ if st.button("Summarize Text"):
         else:
             st.error(f"Error: {response.json().get('error')}")
 
-        abstractive_text = "This is the abstractive summary based on the input text."
+        # Preprocess the input
+        input_seq = x_tokenizer.texts_to_sequences([text_to_process])
+        input_seq = pad_sequences(input_seq, maxlen=max_text_len, padding='post')
+
+        # Generate summary
+        abstractive_summary = generate_summary(input_seq)
 
         st.subheader("Abstractive Text")
-        st.write(abstractive_text)
+        st.write(abstractive_summary)
     else:
         st.error("Please enter some text before processing.")
 

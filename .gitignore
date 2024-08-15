@@ -1,2 +1,15 @@
 old
 env
+venv
+models
+models2
+.ipynb_checkpoints
+transformer_model
+transformer_model2
+transformer_model3
+transformer_model4
+logs
+.h5
+.keras
+data
+results

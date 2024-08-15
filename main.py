@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from sentence_transformers import SentenceTransformer, util
-import re
 import heapq
+import re
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 app = Flask(__name__)
